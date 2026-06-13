@@ -3,7 +3,8 @@
   "displayName": "Simple TODO List",
   "description": "A simple TODO list with grouping, keyboard navigation, and webview UI",
   "version": "0.1.0",
-  "publisher": "simple-todo-list",
+  "publisher": "bbjyzzwwy",
+  "author": "bbjyzzwwy",
   "icon": "resources/icon.png",
   "repository": {
     "type": "git",

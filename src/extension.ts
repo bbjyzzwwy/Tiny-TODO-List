@@ -891,12 +891,13 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
 
     function createTodo(groupId) {
       var newItem = { id: genId(), text: '', completed: false, groupId: groupId, createdAt: Date.now() };
+      var group = getGroup(groupId);
+      if (group) group.collapsed = false;
       state.items.push(newItem);
+      selectedItemIds.clear();
+      selectedItemIds.add(newItem.id);
       scheduleSave(); render();
-      setTimeout(function() {
-        var span = contentEl.querySelector('.todo-text[data-id="' + newItem.id + '"]');
-        if (span) startEditing(newItem.id, span);
-      }, 60);
+      focusTodoForEditing(newItem.id);
     }
 
     function addGroup() {
@@ -928,6 +929,20 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
     }
 
     // ── Inline editing ──
+    function focusTodoForEditing(id, attemptsLeft) {
+      var attempts = typeof attemptsLeft === 'number' ? attemptsLeft : 6;
+      setTimeout(function() {
+        var span = contentEl.querySelector('.todo-text[data-id="' + id + '"]');
+        if (span) {
+          startEditing(id, span);
+          return;
+        }
+        if (attempts > 0) {
+          focusTodoForEditing(id, attempts - 1);
+        }
+      }, 30);
+    }
+
     function startEditingGroup(groupId) {
       var group = getGroup(groupId);
       if (!group || currentTab !== 'todo') return;
@@ -1000,10 +1015,16 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
       }
 
       span.parentElement.replaceChild(textarea, span);
-      textarea.focus();
-      textarea.setSelectionRange(textarea.value.length, textarea.value.length);
-      // Initial resize
-      setTimeout(autoResize, 0);
+      function focusTextarea() {
+        textarea.focus();
+        textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+        autoResize();
+      }
+      focusTextarea();
+      setTimeout(focusTextarea, 0);
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(focusTextarea);
+      }
 
       textarea.addEventListener('input', function() {
         item.text = textarea.value;
@@ -1048,16 +1069,12 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
           } else {
             state.items.push(newItem);
           }
+          selectedItemIds.clear();
+          selectedItemIds.add(newItem.id);
           scheduleSave();
           render();
 
-          // Auto-focus the new item
-          setTimeout(function() {
-            var newSpan = contentEl.querySelector('.todo-text[data-id="' + newItem.id + '"]');
-            if (newSpan) {
-              startEditing(newItem.id, newSpan);
-            }
-          }, 60);
+          focusTodoForEditing(newItem.id);
         } else if (e.key === 'Escape') {
           e.preventDefault();
           // Cancel — restore original text and re-render
