@@ -383,7 +383,7 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
 
     // ── State ──
     const defaultState = { groups: [{ id: 'default', name: 'Default', collapsed: false }], items: [] };
-    const webviewStorageKey = 'simple-todo-list-state-v1';
+    const webviewStorageKey = 'tiny-todo-list-state-v1';
     let state = readSavedWebviewState();
     let currentTab = 'todo';
     let selectedItemIds = new Set();
@@ -1144,7 +1144,7 @@ function getNonce(): string {
 export function activate(context: vscode.ExtensionContext): void {
   const provider = new TodoWebviewViewProvider();
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider('simple-todo-list-treeview', provider, {
+    vscode.window.registerWebviewViewProvider('tiny-todo-list-treeview', provider, {
       webviewOptions: { retainContextWhenHidden: true },
     })
   );

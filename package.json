@@ -1,5 +1,5 @@
 {
-  "name": "bbjy-tiny-todo-list",
+  "name": "tiny-todo-list",
   "displayName": "Tiny TODO List",
   "description": "A simple TODO list with grouping, keyboard navigation, and webview UI",
   "version": "0.1.0",
@@ -17,24 +17,24 @@
     "Other"
   ],
   "activationEvents": [
-    "onView:simple-todo-list-treeview"
+    "onView:tiny-todo-list-treeview"
   ],
   "main": "./out/extension.js",
   "contributes": {
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "simple-todo-list",
+          "id": "tiny-todo-list",
           "title": "Tiny TODO List",
           "icon": "resources/activity-icon.svg"
         }
       ]
     },
     "views": {
-      "simple-todo-list": [
+      "tiny-todo-list": [
         {
           "type": "webview",
-          "id": "simple-todo-list-treeview",
+          "id": "tiny-todo-list-treeview",
           "name": "TODO List"
         }
       ]
