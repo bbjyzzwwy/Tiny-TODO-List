@@ -1,20 +1,20 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/bbjyzzwwy/Simple-TODO-List/master/resources/icon.png" alt="Simple TODO List logo" width="128" height="128">
+  <img src="https://raw.githubusercontent.com/bbjyzzwwy/Tiny-TODO-List/master/resources/icon.png" alt="Tiny TODO List logo" width="128" height="128">
 </p>
 
-<h1 align="center">Simple TODO List</h1>
+<h1 align="center">Tiny TODO List</h1>
 
 <p align="center">
   <strong>A clean sidebar TODO list for VS Code with groups, keyboard editing, and completion tracking.</strong>
 </p>
 
 <p align="center">
-  <a href="https://github.com/bbjyzzwwy/Simple-TODO-List/blob/master/README.md">English</a> |
-  <a href="https://github.com/bbjyzzwwy/Simple-TODO-List/blob/master/README.zh-CN.md">中文</a>
+  <a href="https://github.com/bbjyzzwwy/Tiny-TODO-List/blob/master/README.md">English</a> |
+  <a href="https://github.com/bbjyzzwwy/Tiny-TODO-List/blob/master/README.zh-CN.md">中文</a>
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/bbjyzzwwy/Simple-TODO-List/master/demo.gif" alt="Simple TODO List demo">
+  <img src="https://raw.githubusercontent.com/bbjyzzwwy/Tiny-TODO-List/master/demo.gif" alt="Tiny TODO List demo">
 </p>
 
 ---
@@ -27,7 +27,7 @@
 
 ## Usage
 
-1. Click the Simple TODO List icon in the VS Code Activity Bar.
+1. Click the Tiny TODO List icon in the VS Code Activity Bar.
 2. Add tasks in the sidebar view.
 3. Double-click task text to edit, click checkboxes to complete, and use groups to keep related work together.
 
@@ -64,7 +64,7 @@ Press `F5` in VS Code to launch the Extension Development Host.
 
 ## Changelog
 
-See [CHANGELOG.md](https://github.com/bbjyzzwwy/Simple-TODO-List/blob/master/CHANGELOG.md).
+See [CHANGELOG.md](https://github.com/bbjyzzwwy/Tiny-TODO-List/blob/master/CHANGELOG.md).
 
 ## License
 

@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Simple TODO List are documented in this file.
+All notable changes to Tiny TODO List are documented in this file.
 
 ## [0.1.0] - 2026-06-14
 
@@ -18,7 +18,7 @@ All notable changes to Simple TODO List are documented in this file.
 
 # 更新日志
 
-Simple TODO List 的重要变更都会记录在此文件中。
+Tiny TODO List 的重要变更都会记录在此文件中。
 
 ## [0.1.0] - 2026-06-14
 

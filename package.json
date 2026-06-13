@@ -1,6 +1,6 @@
 {
-  "name": "simple-todo-list",
-  "displayName": "Simple TODO List",
+  "name": "bbjy-tiny-todo-list",
+  "displayName": "Tiny TODO List",
   "description": "A simple TODO list with grouping, keyboard navigation, and webview UI",
   "version": "0.1.0",
   "publisher": "bbjyzzwwy",
@@ -8,7 +8,7 @@
   "icon": "resources/icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/bbjyzzwwy/Simple-TODO-List.git"
+    "url": "https://github.com/bbjyzzwwy/Tiny-TODO-List.git"
   },
   "engines": {
     "vscode": "^1.74.0"
@@ -25,7 +25,7 @@
       "activitybar": [
         {
           "id": "simple-todo-list",
-          "title": "Simple TODO List",
+          "title": "Tiny TODO List",
           "icon": "resources/activity-icon.svg"
         }
       ]

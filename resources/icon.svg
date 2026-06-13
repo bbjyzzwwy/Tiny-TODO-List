@@ -1,5 +1,5 @@
 <svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
-  <title id="title">Simple TODO List icon</title>
+  <title id="title">Tiny TODO List icon</title>
   <desc id="desc">A checklist page with grouped task rows and a highlighted completion mark.</desc>
   <defs>
     <linearGradient id="background" x1="18" y1="14" x2="112" y2="118" gradientUnits="userSpaceOnUse">

@@ -1,5 +1,5 @@
 /**
- * Core data types for the Simple TODO List extension.
+ * Core data types for the Tiny TODO List extension.
  */
 
 /** A single TODO item */
