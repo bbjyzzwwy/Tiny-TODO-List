@@ -3,10 +3,28 @@ import type { TodoGroup, TodoItem, TodoState } from './types';
 
 declare function setInterval(handler: () => void, timeout?: number): unknown;
 declare function clearInterval(handle: unknown): void;
+declare function setTimeout(handler: () => void, timeout?: number): unknown;
+declare function clearTimeout(handle: unknown): void;
 
 const TODO_STATE_KEY = 'tiny-todo-list-state-v1';
 const SETTINGS_SYNC_NOW_COMMAND = 'workbench.userDataSync.actions.syncNow';
-const SETTINGS_SYNC_INTERVAL_MS = 5_000;
+const CONFIG_SECTION = 'tinyTodoList';
+const CONFIG_AUTO_SYNC = 'autoSync';
+const CONFIG_PERIODIC_PULL_SECONDS = 'periodicPullSeconds';
+const DEFAULT_PERIODIC_PULL_SECONDS = 0;
+const MIN_PERIODIC_PULL_SECONDS = 30;
+// Event-driven push: after a syncable change (edit committed, item toggled,
+// added, deleted, group changed…) wait this long, then push once. Bursts of
+// changes within the window collapse into a single sync, like settings.json.
+const SYNC_DEBOUNCE_MS = 1_000;
+// Minimum gap between focus-triggered pulls, so rapid window switching doesn't
+// hammer syncNow (and risk rate-limiting).
+const FOCUS_SYNC_MIN_GAP_MS = 10_000;
+// Lightweight "receive" poll: read globalState and refresh the UI when it
+// changes. This does NOT trigger Settings Sync, so it never hits rate limits;
+// it just surfaces whatever VS Code's own background sync (or our syncNow) has
+// already pulled into globalState.
+const RECEIVE_REFRESH_INTERVAL_MS = 500;
 const DEFAULT_TODO_STATE: TodoState = {
   groups: [{ id: 'default', name: 'Default', collapsed: false }],
   items: [],
@@ -17,6 +35,7 @@ type WebviewMessage = {
   requestId?: number;
   text?: string;
   state?: unknown;
+  sync?: boolean;
 };
 
 type RawTodoState = {
@@ -31,17 +50,72 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
   private stateWriteQueue: Thenable<void> = Promise.resolve();
   private syncTimer: unknown;
+  private refreshTimer: unknown;
+  private pushDebounceTimer: unknown;
   private lastStateSnapshot = '';
   private canRunSettingsSyncCommand = true;
-  private syncInFlight: Promise<void> | undefined;
+  private syncInFlight: Promise<boolean> | undefined;
+  private lastFocusSyncAt = 0;
 
-  constructor(private readonly context: vscode.ExtensionContext) {}
+  constructor(private readonly context: vscode.ExtensionContext) {
+    context.subscriptions.push(
+      vscode.workspace.onDidChangeConfiguration((event) => {
+        if (
+          event.affectsConfiguration(`${CONFIG_SECTION}.${CONFIG_AUTO_SYNC}`) ||
+          event.affectsConfiguration(`${CONFIG_SECTION}.${CONFIG_PERIODIC_PULL_SECONDS}`)
+        ) {
+          this.restartSyncTimer();
+        }
+      }),
+      // Pull when the VS Code window regains focus (like settings.json). Throttled
+      // so rapid alt-tabbing doesn't hammer syncNow.
+      vscode.window.onDidChangeWindowState((windowState) => {
+        if (!windowState.focused) {
+          return;
+        }
+        if (!this.view || !this.isAutoSyncEnabled()) {
+          return;
+        }
+        const now = Date.now();
+        if (now - this.lastFocusSyncAt < FOCUS_SYNC_MIN_GAP_MS) {
+          return;
+        }
+        this.lastFocusSyncAt = now;
+        void this.syncAndRefreshState();
+      })
+    );
+  }
 
   dispose(): void {
     if (this.syncTimer) {
       clearInterval(this.syncTimer);
       this.syncTimer = undefined;
     }
+    if (this.refreshTimer) {
+      clearInterval(this.refreshTimer);
+      this.refreshTimer = undefined;
+    }
+    if (this.pushDebounceTimer) {
+      clearTimeout(this.pushDebounceTimer);
+      this.pushDebounceTimer = undefined;
+    }
+  }
+
+  private isAutoSyncEnabled(): boolean {
+    return vscode.workspace
+      .getConfiguration(CONFIG_SECTION)
+      .get<boolean>(CONFIG_AUTO_SYNC, true);
+  }
+
+  /** Optional periodic full-sync (mainly to pull). 0 / unset = disabled. */
+  private getPeriodicSyncIntervalMs(): number {
+    const seconds = vscode.workspace
+      .getConfiguration(CONFIG_SECTION)
+      .get<number>(CONFIG_PERIODIC_PULL_SECONDS, DEFAULT_PERIODIC_PULL_SECONDS);
+    if (typeof seconds !== 'number' || seconds <= 0) {
+      return 0;
+    }
+    return Math.max(seconds, MIN_PERIODIC_PULL_SECONDS) * 1000;
   }
 
   resolveWebviewView(
@@ -60,7 +134,12 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
       void this.handleMessage(webviewView.webview, message);
     });
     webviewView.onDidChangeVisibility(() => {
-      if (webviewView.visible) {
+      if (!webviewView.visible) {
+        return;
+      }
+      // Always pick up incoming changes; only trigger a push/pull when auto-sync is on.
+      this.refreshFromGlobalState();
+      if (this.isAutoSyncEnabled()) {
         void this.syncAndRefreshState();
       }
     });
@@ -69,8 +148,12 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
       this.view = undefined;
     });
 
-    this.ensureSyncTimer();
-    void this.syncAndRefreshState();
+    this.ensureReceiveTimer();
+    this.restartSyncTimer();
+    this.refreshFromGlobalState();
+    if (this.isAutoSyncEnabled()) {
+      void this.syncAndRefreshState();
+    }
   }
 
   private async handleMessage(
@@ -103,6 +186,17 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
 
     if (message.type === 'updateState') {
       await this.saveTodoState(normalizeTodoState(message.state));
+      // A `sync: true` change is a completed edit / action — push it out
+      // (debounced). Interim keystrokes never reach here.
+      if (message.sync === true) {
+        this.schedulePush();
+      }
+      return;
+    }
+
+    if (message.type === 'manualSync') {
+      const ok = await this.syncAndRefreshState();
+      await webview.postMessage({ type: 'syncComplete', ok });
       return;
     }
 
@@ -130,32 +224,55 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
     return this.stateWriteQueue;
   }
 
-  private ensureSyncTimer(): void {
+  /** Always-on lightweight poll that surfaces incoming changes (no syncNow). */
+  private ensureReceiveTimer(): void {
+    if (this.refreshTimer) {
+      return;
+    }
+
+    this.refreshTimer = setInterval(() => {
+      this.refreshFromGlobalState();
+    }, RECEIVE_REFRESH_INTERVAL_MS);
+  }
+
+  private restartSyncTimer(): void {
     if (this.syncTimer) {
+      clearInterval(this.syncTimer);
+      this.syncTimer = undefined;
+    }
+
+    if (!this.isAutoSyncEnabled()) {
+      return;
+    }
+
+    const intervalMs = this.getPeriodicSyncIntervalMs();
+    if (intervalMs <= 0) {
       return;
     }
 
     this.syncTimer = setInterval(() => {
       void this.syncAndRefreshState();
-    }, SETTINGS_SYNC_INTERVAL_MS);
+    }, intervalMs);
   }
 
-  private async syncAndRefreshState(): Promise<void> {
-    if (this.syncInFlight) {
-      return this.syncInFlight;
+  /** Event-driven push: debounce a syncNow after a completed change. */
+  private schedulePush(): void {
+    if (!this.isAutoSyncEnabled()) {
+      return;
     }
 
-    this.syncInFlight = this.doSyncAndRefreshState();
-    try {
-      await this.syncInFlight;
-    } finally {
-      this.syncInFlight = undefined;
+    if (this.pushDebounceTimer) {
+      clearTimeout(this.pushDebounceTimer);
     }
+
+    this.pushDebounceTimer = setTimeout(() => {
+      this.pushDebounceTimer = undefined;
+      void this.syncAndRefreshState();
+    }, SYNC_DEBOUNCE_MS);
   }
 
-  private async doSyncAndRefreshState(): Promise<void> {
-    await this.runSettingsSyncNow();
-
+  /** Receive path: refresh the UI from globalState if it changed. Cheap, no rate limit. */
+  private refreshFromGlobalState(): void {
     const state = normalizeTodoState(this.context.globalState.get<unknown>(TODO_STATE_KEY));
     const snapshot = serializeTodoState(state);
     if (snapshot === this.lastStateSnapshot) {
@@ -163,20 +280,42 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
     }
 
     this.lastStateSnapshot = snapshot;
-    await this.view?.webview.postMessage({ type: 'state', state });
+    void this.view?.webview.postMessage({ type: 'state', state });
   }
 
-  private async runSettingsSyncNow(): Promise<void> {
+  /** Trigger Settings Sync (push + pull), then refresh. Returns whether syncNow ran. */
+  private async syncAndRefreshState(): Promise<boolean> {
+    if (this.syncInFlight) {
+      return this.syncInFlight;
+    }
+
+    this.syncInFlight = this.doSyncAndRefreshState();
+    try {
+      return await this.syncInFlight;
+    } finally {
+      this.syncInFlight = undefined;
+    }
+  }
+
+  private async doSyncAndRefreshState(): Promise<boolean> {
+    const ok = await this.runSettingsSyncNow();
+    this.refreshFromGlobalState();
+    return ok;
+  }
+
+  private async runSettingsSyncNow(): Promise<boolean> {
     if (!this.canRunSettingsSyncCommand) {
-      return;
+      return false;
     }
 
     try {
       await vscode.commands.executeCommand(SETTINGS_SYNC_NOW_COMMAND);
+      return true;
     } catch (error) {
       if (error instanceof Error && /command .* not found/i.test(error.message)) {
         this.canRunSettingsSyncCommand = false;
       }
+      return false;
     }
   }
 
@@ -235,6 +374,35 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
     .tab.active {
       color: var(--fg-primary);
       border-bottom-color: var(--accent);
+    }
+
+    /* ── Manual sync button ── */
+    .sync-btn {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0 10px;
+      cursor: pointer;
+      color: var(--fg-secondary);
+      border-bottom: 2px solid transparent;
+      font-size: 13px;
+      transition: color 0.15s;
+    }
+    .sync-btn:hover { color: var(--fg-primary); }
+    .sync-btn.syncing {
+      cursor: default;
+      color: var(--accent);
+    }
+    .sync-btn.syncing .sync-icon {
+      animation: sync-spin 0.8s linear infinite;
+    }
+    .sync-btn.success { color: var(--vscode-charts-green, #89d185); }
+    .sync-btn.failed { color: var(--danger); }
+    .sync-icon { display: inline-block; line-height: 1; }
+    @keyframes sync-spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
     }
 
     /* ── Clear button ── */
@@ -501,6 +669,7 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
   <div class="tabs">
     <div class="tab active" data-tab="todo">📋 TODO</div>
     <div class="tab" data-tab="finished">✅ Finished</div>
+    <div class="sync-btn" id="syncBtn" title="Sync now (push + pull)"><span class="sync-icon">🔄</span></div>
   </div>
   <div class="clear-bar" id="clearBar">
     <button class="clear-btn" id="clearFinishedBtn">🗑 Clear All Finished</button>
@@ -521,6 +690,9 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
     let contextMenuState = null;
     let clipboardRequestSeq = 1;
     let hasReceivedHostState = false;
+    let isEditing = false;
+    let pendingHostState = null;
+    let editSession = 0;
     const pendingClipboardReads = {};
 
     // ── Persistence ──
@@ -572,32 +744,53 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
         return cloneState(defaultState);
       }
     }
-    function persistWebviewState(syncToHost) {
+    function persistWebviewState(syncToHost, triggerSync) {
       var snapshot = cloneState(state);
       vscode.setState(snapshot);
       localStorage.setItem(webviewStorageKey, JSON.stringify(snapshot));
       if (syncToHost !== false && hasReceivedHostState) {
-        vscode.postMessage({ type: 'updateState', state: snapshot });
+        vscode.postMessage({ type: 'updateState', state: snapshot, sync: triggerSync !== false });
       }
     }
 
+    // A completed change (edit committed, toggle, add, delete, group op…):
+    // save locally + tell the host to auto-push it (debounced).
     function scheduleSave() {
-      persistWebviewState();
+      persistWebviewState(true, true);
+    }
+    // Interim save while typing: persist locally only, never push.
+    function scheduleLocalSave() {
+      persistWebviewState(false);
     }
     function flushSave() {
-      persistWebviewState();
+      persistWebviewState(true, true);
     }
     window.addEventListener('beforeunload', flushSave);
+    function applyHostState(rawState) {
+      state = normalizeState(rawState);
+      persistWebviewState(false);
+      selectedItemIds.clear();
+      render();
+    }
+
     window.addEventListener('message', function(event) {
       var message = event.data;
       if (!message) return;
 
       if (message.type === 'state') {
         hasReceivedHostState = true;
-        state = normalizeState(message.state);
-        persistWebviewState(false);
-        selectedItemIds.clear();
-        render();
+        // Don't blow away an in-progress edit: stash the latest state and
+        // apply it once the user finishes editing (see endEditSession).
+        if (isEditing) {
+          pendingHostState = message.state;
+          return;
+        }
+        applyHostState(message.state);
+        return;
+      }
+
+      if (message.type === 'syncComplete') {
+        setSyncState(message.ok ? 'success' : 'failed');
         return;
       }
 
@@ -819,7 +1012,7 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
     function showGroupContextMenu(groupId, x, y) {
       contextMenuState = { type: 'group', groupId: groupId };
       contextMenuEl.innerHTML =
-        '<button class="context-menu-button" data-action="import-clipboard" role="menuitem">📥 从剪切板导入</button>';
+        '<button class="context-menu-button" data-action="import-clipboard" role="menuitem">🔄 从剪切板导入</button>';
       positionContextMenu(x, y);
     }
 
@@ -1074,6 +1267,26 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
     }
 
     // ── Inline editing ──
+    // While an edit is active we defer any host/sync state update, then apply
+    // the last pending one once editing truly ends. The session counter lets a
+    // follow-up edit (e.g. Enter creating the next item) claim the session
+    // before the deferred flush fires, so we don't yank the next textarea.
+    function beginEditSession() {
+      isEditing = true;
+      editSession++;
+    }
+    function endEditSession() {
+      var mySession = editSession;
+      isEditing = false;
+      setTimeout(function() {
+        if (isEditing || editSession !== mySession) return;
+        if (pendingHostState === null) return;
+        var pending = pendingHostState;
+        pendingHostState = null;
+        applyHostState(pending);
+      }, 100);
+    }
+
     function focusTodoForEditing(id, attemptsLeft) {
       var attempts = typeof attemptsLeft === 'number' ? attemptsLeft : 6;
       setTimeout(function() {
@@ -1103,6 +1316,7 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
       input.className = 'group-edit-input';
 
       span.parentElement.replaceChild(input, span);
+      beginEditSession();
       input.focus();
       input.select();
 
@@ -1115,6 +1329,7 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
         group.name = input.value.trim() || 'Untitled';
         scheduleSave();
         render();
+        endEditSession();
       }
 
       function cancelAndRender() {
@@ -1123,6 +1338,7 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
         group.name = originalName;
         scheduleSave();
         render();
+        endEditSession();
       }
 
       input.addEventListener('blur', commitAndRender);
@@ -1160,6 +1376,7 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
       }
 
       span.parentElement.replaceChild(textarea, span);
+      beginEditSession();
       function focusTextarea() {
         textarea.focus();
         textarea.setSelectionRange(textarea.value.length, textarea.value.length);
@@ -1174,7 +1391,7 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
       textarea.addEventListener('input', function() {
         item.text = textarea.value;
         autoResize();
-        scheduleSave();
+        scheduleLocalSave();
       });
 
       function commitAndRender() {
@@ -1183,6 +1400,7 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
         item.text = textarea.value.trim();
         scheduleSave();
         render();
+        endEditSession();
       }
 
       function cancelAndRender() {
@@ -1191,6 +1409,7 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
         item.text = originalText;
         scheduleSave();
         render();
+        endEditSession();
       }
 
       // Commit on blur (click outside)
@@ -1269,6 +1488,40 @@ class TodoWebviewViewProvider implements vscode.WebviewViewProvider {
     });
 
     document.getElementById('clearFinishedBtn').addEventListener('click', clearAllFinished);
+
+    // ── Manual sync button ──
+    var syncBtnEl = document.getElementById('syncBtn');
+    var syncIconEl = syncBtnEl.querySelector('.sync-icon');
+    var syncResetTimeout = null;
+    function setSyncState(name) {
+      if (syncResetTimeout) { clearTimeout(syncResetTimeout); syncResetTimeout = null; }
+      syncBtnEl.classList.remove('syncing', 'success', 'failed');
+      if (name === 'syncing') {
+        syncBtnEl.classList.add('syncing');
+        syncIconEl.textContent = '🔄';
+        syncBtnEl.title = 'Syncing…';
+        // Safety: revert to idle even if the host never replies.
+        syncResetTimeout = setTimeout(function() { setSyncState('idle'); }, 8000);
+      } else if (name === 'success') {
+        syncBtnEl.classList.add('success');
+        syncIconEl.textContent = '✓';
+        syncBtnEl.title = 'Synced';
+        syncResetTimeout = setTimeout(function() { setSyncState('idle'); }, 1500);
+      } else if (name === 'failed') {
+        syncBtnEl.classList.add('failed');
+        syncIconEl.textContent = '✕';
+        syncBtnEl.title = 'Sync failed — is Settings Sync turned on?';
+        syncResetTimeout = setTimeout(function() { setSyncState('idle'); }, 2500);
+      } else {
+        syncIconEl.textContent = '🔄';
+        syncBtnEl.title = 'Sync now (push + pull)';
+      }
+    }
+    syncBtnEl.addEventListener('click', function() {
+      if (syncBtnEl.classList.contains('syncing')) return;
+      setSyncState('syncing');
+      vscode.postMessage({ type: 'manualSync' });
+    });
 
     vscode.postMessage({ type: 'requestState', state: cloneState(state) });
     render();

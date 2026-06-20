@@ -38,6 +38,22 @@
           "name": "TODO List"
         }
       ]
+    },
+    "configuration": {
+      "title": "Tiny TODO List",
+      "properties": {
+        "tinyTodoList.autoSync": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Sync automatically without pressing the button. When on: **changes you make are pushed out** shortly after you finish editing (event-driven — only when something actually changed, so it stays light on Settings Sync), and **changes from other devices are pulled in** whenever this VS Code window regains focus. Turn it off to sync only via the manual sync (🔄) button, which does a full push + pull."
+        },
+        "tinyTodoList.periodicPullSeconds": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "markdownDescription": "Also pull changes from other devices on a fixed interval (in seconds), in addition to the focus-triggered pull. Handy if you keep this window focused for long stretches and want it to refresh on its own. `0` disables it — receiving then relies on the focus-triggered pull, VS Code's background Settings Sync, and the manual sync (🔄) button. When enabled, values below 30 are clamped to 30 seconds to avoid rate-limiting."
+        }
+      }
     }
   },
   "scripts": {
